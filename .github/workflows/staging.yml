@@ -1,0 +1,70 @@
+name: Pdf-api Staging CI/CD using Docker Image
+# This workflow builds a Docker image and pushes it to Amazon ECR
+# The workflow uses the latest version of Ubuntu as the runner
+# It updates spryk8s repo for argo
+
+on:
+  push:
+    branches: [ "staging" ]
+
+jobs:
+  build-docker-image:
+    runs-on: ubuntu-latest
+
+    env:
+      ENVIRONMENT: staging
+      BRANCH_NAME: ${{ github.ref_name }}
+      APP_NAME: ${{ github.event.repository.name }}
+
+      APP_DEPLOYMENT_YAML_FILE: ${{ vars.APP_DEPLOYMENT_YAML_FILE }}
+      ECR_REPO_NAME: ${{ vars.ECR_REPO_NAME }}
+      K8S_REPO: ${{ vars.K8S_REPO }}
+      GIT_ACCESS_TOKEN: ${{ secrets.GIT_ACCESS_TOKEN }}
+      
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set environment variables
+      run: |
+        SHORT_COMMIT_HASH=$(git rev-parse --short HEAD)
+        echo "SHORT_COMMIT_HASH=$SHORT_COMMIT_HASH" >> $GITHUB_ENV
+        IMAGE_TAG="${{ env.ENVIRONMENT }}-$SHORT_COMMIT_HASH"
+        echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v2
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: us-west-2
+
+    - name: Log in to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Build the Docker image
+      run: |
+        docker build . --file Dockerfile --build-arg SERVICE_VERSION=${{ env.SHORT_COMMIT_HASH }} --tag ${{ env.ECR_REPO_NAME }}:${{ env.IMAGE_TAG }}
+
+    - name: Push the Docker image to Amazon ECR
+      run: |
+        docker push ${{ env.ECR_REPO_NAME }}:${{ env.IMAGE_TAG }}
+
+    - name: Update ArgoCD Application Image Tag
+      run: |
+        git config --global user.name "github-actions"
+        git config --global user.email "github-actions@github.com"
+
+        # Clone the k8s repo
+        git clone -b ${{ env.ENVIRONMENT }} https://x-access-token:${{ secrets.GIT_ACCESS_TOKEN }}@github.com/${{ env.K8S_REPO }} k8s-repo
+        cd k8s-repo
+
+        # Update the file containing the image tag 
+        sed -i "s|\(image: .*\):.*|\1:${{ env.IMAGE_TAG }}|" ${{ env.APP_DEPLOYMENT_YAML_FILE }}
+
+        # Commit and push the changes
+        git add .
+        git commit -m "Updated ${{ env.APP_NAME }} image tag to ${{ env.IMAGE_TAG }}"
+        git push origin ${{ env.ENVIRONMENT }}  # Change branch if needed
